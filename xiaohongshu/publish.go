@@ -32,10 +32,17 @@ const (
 )
 
 func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
-
 	pp := page.Timeout(300 * time.Second)
 
-	pp.MustNavigate(urlOfPublic).MustWaitIdle().MustWaitDOMStable()
+	if err := pp.Navigate(urlOfPublic); err != nil {
+		return nil, errors.Wrap(err, "导航到发布页面失败")
+	}
+	if err := pp.WaitIdle(30 * time.Second); err != nil {
+		logrus.Warnf("等待页面空闲超时: %v", err)
+	}
+	if err := pp.WaitDOMStable(1*time.Second, 0.5); err != nil {
+		logrus.Warnf("等待 DOM 稳定超时: %v", err)
+	}
 	time.Sleep(1 * time.Second)
 
 	if err := mustClickPublishTab(pp, "上传图文"); err != nil {
@@ -98,7 +105,10 @@ func clickEmptyPosition(page *rod.Page) {
 }
 
 func mustClickPublishTab(page *rod.Page, tabname string) error {
-	page.MustElement(`div.upload-content`).MustWaitVisible()
+	// 等待上传区域出现
+	if _, err := page.Element(`div.upload-content`); err != nil {
+		return errors.Wrap(err, "未找到上传内容区域")
+	}
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
@@ -199,10 +209,15 @@ func uploadImages(page *rod.Page, imagesPaths []string) error {
 	}
 
 	// 等待上传输入框出现
-	uploadInput := pp.MustElement(".upload-input")
+	uploadInput, err := pp.Element(".upload-input")
+	if err != nil {
+		return errors.Wrap(err, "未找到上传输入框(.upload-input)，可能是页面未正确加载或处于非发布状态")
+	}
 
 	// 上传多个文件
-	uploadInput.MustSetFiles(validPaths...)
+	if err := uploadInput.SetFiles(validPaths); err != nil {
+		return errors.Wrap(err, "设置上传文件失败")
+	}
 
 	// 等待并验证上传完成
 	return waitForUploadComplete(pp, len(validPaths))
@@ -240,9 +255,13 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 }
 
 func submitPublish(page *rod.Page, title, content string, tags []string) error {
-
-	titleElem := page.MustElement("div.d-input input")
-	titleElem.MustInput(title)
+	titleElem, err := page.Element("div.d-input input")
+	if err != nil {
+		return errors.Wrap(err, "未找到标题输入框")
+	}
+	if err := titleElem.Input(title); err != nil {
+		return errors.Wrap(err, "输入标题失败")
+	}
 
 	// 检查一下 title 的长度
 	time.Sleep(500 * time.Millisecond) // 等待页面渲染长度提示
@@ -254,7 +273,9 @@ func submitPublish(page *rod.Page, title, content string, tags []string) error {
 	time.Sleep(1 * time.Second)
 
 	if contentElem, ok := getContentElement(page); ok {
-		contentElem.MustInput(content)
+		if err := contentElem.Input(content); err != nil {
+			return errors.Wrap(err, "输入正文失败")
+		}
 
 		inputTags(contentElem, tags)
 
@@ -270,8 +291,13 @@ func submitPublish(page *rod.Page, title, content string, tags []string) error {
 	}
 	slog.Info("检查正文长度：通过")
 
-	submitButton := page.MustElement("div.submit div.d-button-content")
-	submitButton.MustClick()
+	submitButton, err := page.Element("div.submit div.d-button-content")
+	if err != nil {
+		return errors.Wrap(err, "未找到发布按钮")
+	}
+	if err := submitButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击发布按钮失败")
+	}
 
 	time.Sleep(3 * time.Second)
 
@@ -364,16 +390,17 @@ func inputTags(contentElem *rod.Element, tags []string) {
 	time.Sleep(1 * time.Second)
 
 	for i := 0; i < 20; i++ {
-		contentElem.MustKeyActions().
-			Type(input.ArrowDown).
-			MustDo()
+		ka, err := contentElem.KeyActions()
+		if err == nil {
+			_ = ka.Type(input.ArrowDown).Do()
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	contentElem.MustKeyActions().
-		Press(input.Enter).
-		Press(input.Enter).
-		MustDo()
+	ka, err := contentElem.KeyActions()
+	if err == nil {
+		_ = ka.Press(input.Enter).Press(input.Enter).Do()
+	}
 
 	time.Sleep(1 * time.Second)
 
@@ -384,11 +411,14 @@ func inputTags(contentElem *rod.Element, tags []string) {
 }
 
 func inputTag(contentElem *rod.Element, tag string) {
-	contentElem.MustInput("#")
+	if err := contentElem.Input("#"); err != nil {
+		logrus.Warnf("输入 # 失败: %v", err)
+		return
+	}
 	time.Sleep(200 * time.Millisecond)
 
 	for _, char := range tag {
-		contentElem.MustInput(string(char))
+		_ = contentElem.Input(string(char))
 		time.Sleep(50 * time.Millisecond)
 	}
 
