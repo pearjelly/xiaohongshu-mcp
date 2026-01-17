@@ -19,27 +19,42 @@ func NewLogin(page *rod.Page) *LoginAction {
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx)
 
-	// 使用非Must方法，避免panic
-	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
-		return false, errors.Wrap(err, "navigate to explore page failed")
+	// Check if we are already on xiaohongshu.com
+	info, err := pp.Info()
+	if err == nil && (info.URL == "" || info.URL == "about:blank") {
+		// Only navigate if we are on a blank page
+		if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+			return false, errors.Wrap(err, "navigate to explore page failed")
+		}
+		if err := pp.WaitLoad(); err != nil {
+			return false, errors.Wrap(err, "wait page load failed")
+		}
+		time.Sleep(1 * time.Second)
 	}
 
-	if err := pp.WaitLoad(); err != nil {
-		return false, errors.Wrap(err, "wait page load failed")
-	}
-
-	time.Sleep(1 * time.Second)
-
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+	// Try to find the element on the current page without refreshing
+	// Using a more generic selector for the user profile entry in sidebar which exists on most pages
+	exists, _, err := pp.Has(`.side-bar .user`)
 	if err != nil {
-		return false, errors.Wrap(err, "check login status failed")
+		// Fallback to original selector if checking fails (though Has shouldn't fail easily)
+		exists, _, err = pp.Has(`.main-container .user .link-wrapper .channel`)
+		if err != nil {
+			return false, errors.Wrap(err, "check login status failed")
+		}
 	}
 
-	if !exists {
-		return false, nil // 返回false表示未登录，但不是错误
+	if exists {
+		return true, nil
 	}
 
-	return true, nil
+	// Double check: if we are on XHS but element not found, maybe we need to wait or it's a different page layout?
+	// But purely for "CheckStatus", returning false is safer than forcibly refreshing which disrupts user.
+	// If the user is logged out, the element won't be there.
+
+	// One edge case: We are on XHS but the DOM hasn't loaded the sidebar yet.
+	// But this is a background check.
+
+	return false, nil
 }
 
 func (a *LoginAction) Login(ctx context.Context) error {
