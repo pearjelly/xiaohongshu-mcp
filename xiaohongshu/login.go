@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -30,8 +31,38 @@ func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 			return false, errors.Wrap(err, "wait page load failed")
 		}
 		time.Sleep(1 * time.Second)
+		// 重新获取页面信息
+		info, _ = pp.Info()
 	}
 
+	// 根据当前页面选择不同的检测策略
+	currentURL := ""
+	if info != nil {
+		currentURL = info.URL
+	}
+
+	// 创作服务平台 (creator.xiaohongshu.com) 使用不同的选择器
+	if strings.Contains(currentURL, "creator.xiaohongshu.com") {
+		// 创作平台页面通过检测右上角的用户信息容器或用户头像来判断登录状态
+		exists, _, err := pp.Has(`.user-info`)
+		if err == nil && exists {
+			return true, nil
+		}
+		// 备用选择器：用户头像
+		exists, _, err = pp.Has(`.user_avatar`)
+		if err == nil && exists {
+			return true, nil
+		}
+		// 备用选择器：发布按钮区域（只有登录用户才能看到）
+		exists, _, err = pp.Has(`.publish-video`)
+		if err == nil && exists {
+			return true, nil
+		}
+		// 如果以上都找不到，可能确实未登录
+		return false, nil
+	}
+
+	// 小红书主站 (www.xiaohongshu.com) 的检测逻辑
 	// Try to find the element on the current page without refreshing
 	// Using a more generic selector for the user profile entry in sidebar which exists on most pages
 	exists, _, err := pp.Has(`.side-bar .user`)
