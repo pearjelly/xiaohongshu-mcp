@@ -201,8 +201,6 @@ func isElementBlocked(elem *rod.Element) (bool, error) {
 }
 
 func uploadImages(page *rod.Page, imagesPaths []string) error {
-	pp := page.Timeout(30 * time.Second)
-
 	// 验证文件路径有效性
 	validPaths := make([]string, 0, len(imagesPaths))
 	for _, path := range imagesPaths {
@@ -211,63 +209,78 @@ func uploadImages(page *rod.Page, imagesPaths []string) error {
 			continue
 		}
 		validPaths = append(validPaths, path)
-
 		logrus.Infof("获取有效图片：%s", path)
 	}
 
-	// 等待上传输入框出现
-	uploadInput, err := pp.Element(".upload-input")
-	if err != nil {
-		return errors.Wrap(err, "未找到上传输入框(.upload-input)，可能是页面未正确加载或处于非发布状态")
+	// 逐张上传：每张上传后等待预览出现，再上传下一张
+	for i, path := range validPaths {
+		selector := `input[type="file"]`
+		if i == 0 {
+			selector = ".upload-input"
+		}
+
+		uploadInput, err := page.Element(selector)
+		if err != nil {
+			return errors.Wrapf(err, "查找上传输入框失败(第%d张)", i+1)
+		}
+		if err := uploadInput.SetFiles([]string{path}); err != nil {
+			return errors.Wrapf(err, "上传第%d张图片失败", i+1)
+		}
+
+		slog.Info("图片已提交上传", "index", i+1, "path", path)
+
+		// 等待当前图片上传完成（预览元素数量达到 i+1），最多等 60 秒
+		if err := waitForUploadComplete(page, i+1); err != nil {
+			return errors.Wrapf(err, "第%d张图片上传超时", i+1)
+		}
+		time.Sleep(1 * time.Second)
 	}
 
-	// 上传多个文件
-	if err := uploadInput.SetFiles(validPaths); err != nil {
-		return errors.Wrap(err, "设置上传文件失败")
-	}
-
-	// 等待并验证上传完成
-	return waitForUploadComplete(pp, len(validPaths))
+	return nil
 }
 
-// waitForUploadComplete 等待并验证上传完成
+// waitForUploadComplete 等待第 expectedCount 张图片上传完成，最多等 60 秒
 func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 	maxWaitTime := 60 * time.Second
 	checkInterval := 500 * time.Millisecond
 	start := time.Now()
-
-	slog.Info("开始等待图片上传完成", "expected_count", expectedCount)
+	lastLogCount := expectedCount - 1
 
 	for time.Since(start) < maxWaitTime {
-		// 使用具体的pr类名检查已上传的图片
 		uploadedImages, err := page.Elements(".img-preview-area .pr")
+		if err != nil {
+			time.Sleep(checkInterval)
+			continue
+		}
 
-		slog.Info("uploadedImages", "uploadedImages", uploadedImages)
-
-		if err == nil {
-			currentCount := len(uploadedImages)
-			slog.Info("检测到已上传图片", "current_count", currentCount, "expected_count", expectedCount)
-			if currentCount >= expectedCount {
-				slog.Info("所有图片上传完成", "count", currentCount)
-				return nil
-			}
-		} else {
-			slog.Debug("未找到已上传图片元素")
+		currentCount := len(uploadedImages)
+		// 数量变化时才打印，避免刷屏
+		if currentCount != lastLogCount {
+			slog.Info("等待图片上传", "current", currentCount, "expected", expectedCount)
+			lastLogCount = currentCount
+		}
+		if currentCount >= expectedCount {
+			slog.Info("图片上传完成", "count", currentCount)
+			return nil
 		}
 
 		time.Sleep(checkInterval)
 	}
 
-	return errors.New("上传超时，请检查网络连接和图片大小")
+	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
 }
 
 func submitPublish(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time) error {
+	titleElem, err := page.Element("div.d-input input")
+	if err != nil {
+		return errors.Wrap(err, "查找标题输入框失败")
+	}
+	if err := titleElem.Input(title); err != nil {
+		return errors.Wrap(err, "输入标题失败")
+	}
 
-	titleElem := page.MustElement("div.d-input input")
-	titleElem.MustInput(title)
-
-	// 检查一下 title 的长度
-	time.Sleep(500 * time.Millisecond) // 等待页面渲染长度提示
+	// 检查标题长度
+	time.Sleep(500 * time.Millisecond)
 	if err := checkTitleMaxLength(page); err != nil {
 		return err
 	}
@@ -275,20 +288,20 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 
 	time.Sleep(1 * time.Second)
 
-	if contentElem, ok := getContentElement(page); ok {
-		if err := contentElem.Input(content); err != nil {
-			return errors.Wrap(err, "输入正文失败")
-		}
-
-		inputTags(contentElem, tags)
-
-	} else {
+	contentElem, ok := getContentElement(page)
+	if !ok {
 		return errors.New("没有找到内容输入框")
+	}
+	if err := contentElem.Input(content); err != nil {
+		return errors.Wrap(err, "输入正文失败")
+	}
+	if err := inputTags(contentElem, tags); err != nil {
+		return err
 	}
 
 	time.Sleep(1 * time.Second)
 
-	// 正文的长度的判定：
+	// 检查正文长度
 	if err := checkContentMaxLength(page); err != nil {
 		return err
 	}
@@ -302,11 +315,15 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 		slog.Info("定时发布设置完成", "schedule_time", scheduleTime.Format("2006-01-02 15:04"))
 	}
 
-	submitButton := page.MustElement(".publish-page-publish-btn button.bg-red")
-	submitButton.MustClick()
+	submitButton, err := page.Element(".publish-page-publish-btn button.bg-red")
+	if err != nil {
+		return errors.Wrap(err, "查找发布按钮失败")
+	}
+	if err := submitButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击发布按钮失败")
+	}
 
 	time.Sleep(3 * time.Second)
-
 	return nil
 }
 
@@ -388,43 +405,53 @@ func getContentElement(page *rod.Page) (*rod.Element, bool) {
 	return nil, false
 }
 
-func inputTags(contentElem *rod.Element, tags []string) {
+func inputTags(contentElem *rod.Element, tags []string) error {
 	if len(tags) == 0 {
-		return
+		return nil
 	}
 
 	time.Sleep(1 * time.Second)
 
 	for i := 0; i < 20; i++ {
 		ka, err := contentElem.KeyActions()
-		if err == nil {
-			_ = ka.Type(input.ArrowDown).Do()
+		if err != nil {
+			return errors.Wrap(err, "创建键盘操作失败")
+		}
+		if err := ka.Type(input.ArrowDown).Do(); err != nil {
+			return errors.Wrap(err, "按下方向键失败")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	ka, err := contentElem.KeyActions()
-	if err == nil {
-		_ = ka.Press(input.Enter).Press(input.Enter).Do()
+	if err != nil {
+		return errors.Wrap(err, "创建键盘操作失败")
+	}
+	if err := ka.Press(input.Enter).Press(input.Enter).Do(); err != nil {
+		return errors.Wrap(err, "按下回车键失败")
 	}
 
 	time.Sleep(1 * time.Second)
 
 	for _, tag := range tags {
 		tag = strings.TrimLeft(tag, "#")
-		inputTag(contentElem, tag)
+		if err := inputTag(contentElem, tag); err != nil {
+			return errors.Wrapf(err, "输入标签[%s]失败", tag)
+		}
 	}
+	return nil
 }
 
-func inputTag(contentElem *rod.Element, tag string) {
+func inputTag(contentElem *rod.Element, tag string) error {
 	if err := contentElem.Input("#"); err != nil {
-		logrus.Warnf("输入 # 失败: %v", err)
-		return
+		return errors.Wrap(err, "输入#失败")
 	}
 	time.Sleep(200 * time.Millisecond)
 
 	for _, char := range tag {
-		_ = contentElem.Input(string(char))
+		if err := contentElem.Input(string(char)); err != nil {
+			return errors.Wrapf(err, "输入字符[%c]失败", char)
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
@@ -432,24 +459,25 @@ func inputTag(contentElem *rod.Element, tag string) {
 
 	page := contentElem.Page()
 	topicContainer, err := page.Element("#creator-editor-topic-container")
-	if err == nil && topicContainer != nil {
-		firstItem, err := topicContainer.Element(".item")
-		if err == nil && firstItem != nil {
-			firstItem.MustClick()
-			slog.Info("成功点击标签联想选项", "tag", tag)
-			time.Sleep(200 * time.Millisecond)
-		} else {
-			slog.Warn("未找到标签联想选项，直接输入空格", "tag", tag)
-			// 如果没有找到联想选项，输入空格结束
-			contentElem.MustInput(" ")
-		}
-	} else {
+	if err != nil || topicContainer == nil {
 		slog.Warn("未找到标签联想下拉框，直接输入空格", "tag", tag)
-		// 如果没有找到下拉框，输入空格结束
-		contentElem.MustInput(" ")
+		return contentElem.Input(" ")
 	}
 
+	firstItem, err := topicContainer.Element(".item")
+	if err != nil || firstItem == nil {
+		slog.Warn("未找到标签联想选项，直接输入空格", "tag", tag)
+		return contentElem.Input(" ")
+	}
+
+	if err := firstItem.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return errors.Wrap(err, "点击标签联想选项失败")
+	}
+	slog.Info("成功点击标签联想选项", "tag", tag)
+	time.Sleep(200 * time.Millisecond)
+
 	time.Sleep(500 * time.Millisecond) // 等待标签处理完成
+	return nil
 }
 
 func findTextboxByPlaceholder(page *rod.Page) (*rod.Element, error) {
