@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/xpzouying/xiaohongshu-mcp/errors"
 )
 
@@ -169,10 +170,23 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 	page := s.page.Context(ctx)
 
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL)
-	page.MustWaitStable()
+	if err := page.Navigate(searchURL); err != nil {
+		return nil, fmt.Errorf("导航到搜索页失败: %w", err)
+	}
+	if err := page.WaitStable(time.Second); err != nil {
+		return nil, fmt.Errorf("等待页面稳定失败: %w", err)
+	}
 
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	if _, err := page.Eval(`() => new Promise((resolve, reject) => {
+		const check = () => {
+			if (window.__INITIAL_STATE__ !== undefined) { resolve(true); return; }
+			setTimeout(check, 200);
+		};
+		check();
+		setTimeout(() => reject(new Error('timeout waiting for __INITIAL_STATE__')), 30000);
+	})`); err != nil {
+		return nil, fmt.Errorf("等待页面初始化失败: %w", err)
+	}
 
 	// 如果有筛选条件，则应用筛选
 	if len(filters) > 0 {
@@ -194,27 +208,57 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 		}
 
 		// 悬停在筛选按钮上
-		filterButton := page.MustElement(`div.filter`)
-		filterButton.MustHover()
+		filterButton, err := page.Element(`div.filter`)
+		if err != nil {
+			return nil, fmt.Errorf("查找筛选按钮失败: %w", err)
+		}
+		if err := filterButton.Hover(); err != nil {
+			return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
+		}
 
 		// 等待筛选面板出现
-		page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
+		if _, err := page.Eval(`() => new Promise((resolve, reject) => {
+			const check = () => {
+				if (document.querySelector('div.filter-panel') !== null) { resolve(true); return; }
+				setTimeout(check, 200);
+			};
+			check();
+			setTimeout(() => reject(new Error('timeout waiting for filter-panel')), 10000);
+		})`); err != nil {
+			return nil, fmt.Errorf("等待筛选面板出现失败: %w", err)
+		}
 
 		// 应用所有筛选条件
 		for _, filter := range allInternalFilters {
 			selector := fmt.Sprintf(`div.filter-panel div.filters:nth-child(%d) div.tags:nth-child(%d)`,
 				filter.FiltersIndex, filter.TagsIndex)
-			option := page.MustElement(selector)
-			option.MustClick()
+			option, err := page.Element(selector)
+			if err != nil {
+				return nil, fmt.Errorf("查找筛选选项失败 (%s): %w", selector, err)
+			}
+			if err := option.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return nil, fmt.Errorf("点击筛选选项失败: %w", err)
+			}
 		}
 
 		// 等待页面更新
-		page.MustWaitStable()
+		if err := page.WaitStable(time.Second); err != nil {
+			return nil, fmt.Errorf("等待筛选结果页面稳定失败: %w", err)
+		}
 		// 重新等待 __INITIAL_STATE__ 更新
-		page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+		if _, err := page.Eval(`() => new Promise((resolve, reject) => {
+			const check = () => {
+				if (window.__INITIAL_STATE__ !== undefined) { resolve(true); return; }
+				setTimeout(check, 200);
+			};
+			check();
+			setTimeout(() => reject(new Error('timeout waiting for __INITIAL_STATE__')), 30000);
+		})`); err != nil {
+			return nil, fmt.Errorf("等待筛选后页面初始化失败: %w", err)
+		}
 	}
 
-	result := page.MustEval(`() => {
+	evalResult, err := page.Eval(`() => {
 		if (window.__INITIAL_STATE__ &&
 		    window.__INITIAL_STATE__.search &&
 		    window.__INITIAL_STATE__.search.feeds) {
@@ -225,8 +269,12 @@ func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...Fi
 			}
 		}
 		return "";
-	}`).String()
+	}`)
+	if err != nil {
+		return nil, fmt.Errorf("获取搜索结果失败: %w", err)
+	}
 
+	result := evalResult.Value.String()
 	if result == "" {
 		return nil, errors.ErrNoFeeds
 	}
