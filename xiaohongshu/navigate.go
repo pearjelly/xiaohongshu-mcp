@@ -2,6 +2,8 @@ package xiaohongshu
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/go-rod/rod"
 )
@@ -32,14 +34,17 @@ func (n *NavigateAction) ToProfilePage(ctx context.Context) error {
 		return err
 	}
 
-	page.MustWaitStable()
-
 	// Find and click the "我" channel link in sidebar
-	profileLink := page.MustElement(`div.main-container li.user.side-bar-component a.link-wrapper span.channel`)
+	// Select specifically the 'user' component in sidebar
+	profileLink, err := page.Timeout(5 * time.Second).Element(`div#app .side-bar .user`)
+	if err != nil {
+		// Fallback or detailed error
+		return fmt.Errorf("could not find profile link in sidebar: %w", err)
+	}
 	profileLink.MustClick()
 
-	// Wait for navigation to complete
-	page.MustWaitLoad()
+	// Wait for navigation to profile page (SPA navigation, so MustWaitLoad won't work)
+	page.MustWait(`() => location.href.includes('/user/profile')`)
 
 	return nil
 }

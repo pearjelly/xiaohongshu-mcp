@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -18,27 +19,86 @@ func NewLogin(page *rod.Page) *LoginAction {
 
 func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
 	pp := a.page.Context(ctx)
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 
-	time.Sleep(1 * time.Second)
+	// Check if we are already on xiaohongshu.com
+	info, err := pp.Info()
+	if err == nil && (info.URL == "" || info.URL == "about:blank") {
+		// Only navigate if we are on a blank page
+		if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+			return false, errors.Wrap(err, "navigate to explore page failed")
+		}
+		if err := pp.WaitLoad(); err != nil {
+			return false, errors.Wrap(err, "wait page load failed")
+		}
+		time.Sleep(1 * time.Second)
+		// 重新获取页面信息
+		info, _ = pp.Info()
+	}
 
-	exists, _, err := pp.Has(`.main-container .user .link-wrapper .channel`)
+	// 根据当前页面选择不同的检测策略
+	currentURL := ""
+	if info != nil {
+		currentURL = info.URL
+	}
+
+	// 创作服务平台 (creator.xiaohongshu.com) 使用不同的选择器
+	if strings.Contains(currentURL, "creator.xiaohongshu.com") {
+		// 创作平台页面通过检测右上角的用户信息容器或用户头像来判断登录状态
+		exists, _, err := pp.Has(`.user-info`)
+		if err == nil && exists {
+			return true, nil
+		}
+		// 备用选择器：用户头像
+		exists, _, err = pp.Has(`.user_avatar`)
+		if err == nil && exists {
+			return true, nil
+		}
+		// 备用选择器：发布按钮区域（只有登录用户才能看到）
+		exists, _, err = pp.Has(`.publish-video`)
+		if err == nil && exists {
+			return true, nil
+		}
+		// 如果以上都找不到，可能确实未登录
+		return false, nil
+	}
+
+	// 小红书主站 (www.xiaohongshu.com) 的检测逻辑
+	// Try to find the element on the current page without refreshing
+	// Using a more generic selector for the user profile entry in sidebar which exists on most pages
+	exists, _, err := pp.Has(`.side-bar .user`)
 	if err != nil {
-		return false, errors.Wrap(err, "check login status failed")
+		// Fallback to original selector if checking fails (though Has shouldn't fail easily)
+		exists, _, err = pp.Has(`.main-container .user .link-wrapper .channel`)
+		if err != nil {
+			return false, errors.Wrap(err, "check login status failed")
+		}
 	}
 
-	if !exists {
-		return false, errors.Wrap(err, "login status element not found")
+	if exists {
+		return true, nil
 	}
 
-	return true, nil
+	// Double check: if we are on XHS but element not found, maybe we need to wait or it's a different page layout?
+	// But purely for "CheckStatus", returning false is safer than forcibly refreshing which disrupts user.
+	// If the user is logged out, the element won't be there.
+
+	// One edge case: We are on XHS but the DOM hasn't loaded the sidebar yet.
+	// But this is a background check.
+
+	return false, nil
 }
 
 func (a *LoginAction) Login(ctx context.Context) error {
 	pp := a.page.Context(ctx)
 
 	// 导航到小红书首页，这会触发二维码弹窗
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+		return errors.Wrap(err, "navigate to explore page failed")
+	}
+
+	if err := pp.WaitLoad(); err != nil {
+		return errors.Wrap(err, "wait page load failed")
+	}
 
 	// 等待一小段时间让页面完全加载
 	time.Sleep(2 * time.Second)
@@ -51,7 +111,10 @@ func (a *LoginAction) Login(ctx context.Context) error {
 
 	// 等待扫码成功提示或者登录完成
 	// 这里我们等待登录成功的元素出现，这样更简单可靠
-	pp.MustElement(".main-container .user .link-wrapper .channel")
+	_, err := pp.Element(".main-container .user .link-wrapper .channel")
+	if err != nil {
+		return errors.Wrap(err, "wait for login element failed")
+	}
 
 	return nil
 }
@@ -60,7 +123,13 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	pp := a.page.Context(ctx)
 
 	// 导航到小红书首页，这会触发二维码弹窗
-	pp.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+	if err := pp.Navigate("https://www.xiaohongshu.com/explore"); err != nil {
+		return "", false, errors.Wrap(err, "navigate to explore page failed")
+	}
+
+	if err := pp.WaitLoad(); err != nil {
+		return "", false, errors.Wrap(err, "wait page load failed")
+	}
 
 	// 等待一小段时间让页面完全加载
 	time.Sleep(2 * time.Second)
@@ -71,7 +140,12 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	}
 
 	// 获取二维码图片
-	src, err := pp.MustElement(".login-container .qrcode-img").Attribute("src")
+	el, err := pp.Element(".login-container .qrcode-img")
+	if err != nil {
+		return "", false, errors.Wrap(err, "find qrcode element failed")
+	}
+
+	src, err := el.Attribute("src")
 	if err != nil {
 		return "", false, errors.Wrap(err, "get qrcode src failed")
 	}

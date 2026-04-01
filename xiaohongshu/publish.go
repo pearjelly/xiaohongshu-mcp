@@ -36,7 +36,6 @@ const (
 )
 
 func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
-
 	pp := page.Timeout(300 * time.Second)
 
 	// 使用更稳健的导航和等待策略
@@ -116,7 +115,10 @@ func clickEmptyPosition(page *rod.Page) {
 }
 
 func mustClickPublishTab(page *rod.Page, tabname string) error {
-	page.MustElement(`div.upload-content`).MustWaitVisible()
+	// 等待上传区域出现
+	if _, err := page.Element(`div.upload-content`); err != nil {
+		return errors.Wrap(err, "未找到上传内容区域")
+	}
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {

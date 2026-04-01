@@ -115,8 +115,8 @@ func (u *UserProfileAction) GetMyProfileViaSidebar(ctx context.Context) (*UserPr
 		return nil, fmt.Errorf("failed to navigate to profile page via sidebar: %w", err)
 	}
 
-	// 等待页面加载完成并获取 __INITIAL_STATE__
-	page.MustWaitStable()
+	// Wait for page data to be ready
+	page.MustWaitDOMStable()
 
 	return u.extractUserProfileData(page)
 }
